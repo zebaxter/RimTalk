@@ -1,17 +1,20 @@
 import "dotenv/config";
-import { Client, GatewayIntentBits, Events } from "discord.js";
+import { Client, GatewayIntentBits, Events, EmbedBuilder } from "discord.js";
 import fs from "fs";
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const NBA_API_KEY = process.env.NBA_API_KEY;
 
-const CHANNEL_SCORES_ID = process.env.CHANNEL_SCORES_ID;
+const CHANNEL_MATCH_DU_JOUR = process.env.CHANNEL_MATCH_DU_JOUR; // ✅ programme (schedule)
+const CHANNEL_SCORES_ID = process.env.CHANNEL_SCORES_ID;         // ✅ scores live / updates
+
 const CHANNEL_INJURY_ID = process.env.CHANNEL_INJURY_ID;
 const CHANNEL_TRADE_ID  = process.env.CHANNEL_TRADE_ID;
 const CHANNEL_DRAFT_ID  = process.env.CHANNEL_DRAFT_ID;
 
 if (!DISCORD_TOKEN) throw new Error("❌ DISCORD_TOKEN manquant dans .env");
 if (!NBA_API_KEY) throw new Error("❌ NBA_API_KEY manquant dans .env");
+if (!CHANNEL_MATCH_DU_JOUR) throw new Error("❌ CHANNEL_MATCH_DU_JOUR manquant dans .env");
 if (!CHANNEL_SCORES_ID) throw new Error("❌ CHANNEL_SCORES_ID manquant dans .env");
 
 // ---- Discord client
@@ -19,7 +22,9 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds],
 });
 
-// ---- Persisted state (anti-spam même après restart)
+// ======================
+// STATE (anti-spam même après restart)
+// ======================
 const STATE_FILE = "./state.json";
 function loadState() {
   try { return JSON.parse(fs.readFileSync(STATE_FILE, "utf-8")); }
@@ -30,7 +35,6 @@ function saveState(state) {
 }
 const state = loadState();
 
-// Util: publish only if changed
 function shouldPost(key, signature) {
   const prev = state.posted[key];
   if (prev === signature) return false;
@@ -39,8 +43,11 @@ function shouldPost(key, signature) {
   return true;
 }
 
-// ---- Time helpers
+// ======================
+// DATE PARIS (NORMAL + TEST COMMENTÉ)
+// ======================
 function parisDateYYYYMMDD() {
+  // ✅ VERSION NORMALE (temps réel Paris)
   const now = new Date();
   const parts = new Intl.DateTimeFormat("fr-FR", {
     timeZone: "Europe/Paris",
@@ -52,7 +59,14 @@ function parisDateYYYYMMDD() {
   const yyyy = parts.find(p => p.type === "year").value;
   const mm = parts.find(p => p.type === "month").value;
   const dd = parts.find(p => p.type === "day").value;
-  return `${yyyy}-${mm}-${dd}`;
+
+  // return `${yyyy}-${mm}-${dd}`;
+
+  // ===========================
+  // 🧪 VERSION TEST (décommenter pour forcer une date)
+  return "2024-12-25"; // Christmas games
+  // return "2024-02-08"; // Trade deadline (si tu testes autre chose)
+  // ===========================
 }
 
 function parisHourMinute() {
@@ -69,28 +83,107 @@ function parisHourMinute() {
   return { hh: Number(hh), mi: Number(mi) };
 }
 
-// ---- BallDontLie: games by date
+// ======================
+// LOGOS (PNG pour Discord)
+// ======================
+function espnLogoPng(abbr) {
+  const a = (abbr || "").toLowerCase();
+  return a ? `https://a.espncdn.com/i/teamlogos/nba/500/${a}.png` : null;
+}
+
+// ======================
+// TIME FORMAT (Paris)
+// ======================
+function formatTipoffParis(isoDate) {
+  if (!isoDate) return "Heure inconnue";
+  const d = new Date(isoDate);
+
+  const hm = new Intl.DateTimeFormat("fr-FR", {
+    timeZone: "Europe/Paris",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(d);
+
+  const day = new Intl.DateTimeFormat("fr-FR", {
+    timeZone: "Europe/Paris",
+    weekday: "short",
+    day: "2-digit",
+    month: "short",
+  }).format(d);
+
+  return `${day} • ${hm} (Paris)`;
+}
+
+// ======================
+// BALLDONTLIE
+// ======================
 async function fetchGamesByDate(dateYYYYMMDD) {
   const url = `https://api.balldontlie.io/v1/games?dates[]=${dateYYYYMMDD}&per_page=100`;
   const res = await fetch(url, { headers: { Authorization: NBA_API_KEY } });
+
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
     throw new Error(`API error ${res.status} ${txt}`);
   }
+
   const json = await res.json();
   return json.data ?? [];
 }
 
-function formatGameLine(g) {
+// ======================
+// EMBEDS (beaux)
+// ======================
+function gameScheduleEmbed(g, dateLabel) {
+  const home = g.home_team?.abbreviation ?? "HOME";
+  const away = g.visitor_team?.abbreviation ?? "AWAY";
+
+  const tipoff = formatTipoffParis(g.date);
+  const status = g.status ?? "TBD";
+
+  const awayLogo = espnLogoPng(away);
+  const homeLogo = espnLogoPng(home);
+
+  const e = new EmbedBuilder()
+    .setTitle(`${away} @ ${home}`)
+    .setDescription(`🕒 **${tipoff}**\n📌 **${status}**`)
+    .setFooter({ text: `Programme NBA — ${dateLabel}` })
+    .setTimestamp(new Date());
+
+  if (awayLogo) e.setAuthor({ name: away, iconURL: awayLogo });
+  if (homeLogo) e.setThumbnail(homeLogo);
+
+  return e;
+}
+
+function gameScoreEmbed(g, dateLabel) {
   const home = g.home_team?.abbreviation ?? "HOME";
   const away = g.visitor_team?.abbreviation ?? "AWAY";
   const hs = g.home_team_score ?? 0;
   const as = g.visitor_team_score ?? 0;
+
+  const tipoff = formatTipoffParis(g.date);
   const status = g.status ?? "TBD";
-  return `• **${away} ${as} - ${hs} ${home}** · ${status}`;
+
+  const awayLogo = espnLogoPng(away);
+  const homeLogo = espnLogoPng(home);
+
+  const e = new EmbedBuilder()
+    .setTitle(`${away} @ ${home}`)
+    .setDescription(`**${away} ${as} — ${hs} ${home}**\n🕒 ${tipoff}\n📌 ${status}`)
+    .setFooter({ text: `Scores live — ${dateLabel}` })
+    .setTimestamp(new Date());
+
+  if (awayLogo) e.setAuthor({ name: away, iconURL: awayLogo });
+  if (homeLogo) e.setThumbnail(homeLogo);
+
+  return e;
 }
 
-async function postDailyScheduleIfNeeded(channel) {
+// ======================
+// PROGRAMME -> CHANNEL_MATCH_DU_JOUR
+// ======================
+async function postDailyScheduleIfNeeded(matchDuJourChannel) {
   const date = parisDateYYYYMMDD();
   if (state.lastScheduleDatePosted === date) return;
 
@@ -99,11 +192,16 @@ async function postDailyScheduleIfNeeded(channel) {
   saveState(state);
 
   if (!games.length) {
-    await channel.send(`📅 **Programme NBA du ${date}**\nAucun match prévu aujourd’hui.`);
+    const e = new EmbedBuilder()
+      .setTitle(`📅 Programme NBA — ${date}`)
+      .setDescription("Aucun match prévu ce jour-là.")
+      .setTimestamp(new Date());
+
+    await matchDuJourChannel.send({ embeds: [e] });
     return;
   }
 
-  // Init anti-spam des updates de score
+  // Init anti-spam score pour éviter spam au 1er poll
   for (const g of games) {
     const gameId = String(g.id);
     const signature = `${g.visitor_team_score}-${g.home_team_score}-${g.status}`;
@@ -111,35 +209,61 @@ async function postDailyScheduleIfNeeded(channel) {
   }
   saveState(state);
 
-  const lines = games.map(formatGameLine).join("\n");
-  await channel.send(`📅 **Programme NBA du ${date}**\n${lines}`);
+  // Header
+  const header = new EmbedBuilder()
+    .setTitle(`📅 Programme NBA — ${date}`)
+    .setDescription(`Matchs du jour : **${games.length}**`)
+    .setTimestamp(new Date());
+
+  await matchDuJourChannel.send({ embeds: [header] });
+
+  // 1 embed par match (Discord limite 10 embeds par message)
+  const embeds = games.map(g => gameScheduleEmbed(g, date));
+  for (let i = 0; i < embeds.length; i += 10) {
+    await matchDuJourChannel.send({ embeds: embeds.slice(i, i + 10) });
+  }
 }
 
-async function pollAndPostScoreUpdates(channel) {
+// ======================
+// SCORES LIVE -> CHANNEL_SCORES_ID
+// ======================
+async function pollAndPostScoreUpdates(scoresChannel) {
   const date = parisDateYYYYMMDD();
   const games = await fetchGamesByDate(date);
   if (!games.length) return;
 
-  const updates = [];
+  const changed = [];
+
   for (const g of games) {
     const gameId = String(g.id);
     const signature = `${g.visitor_team_score}-${g.home_team_score}-${g.status}`;
+
     if (shouldPost(`score_${gameId}`, signature)) {
-      // Au 1er passage après restart, ça risque de poster tout : on évite si pas encore "live/final"
-      // Si tu veux poster tout de suite au restart, supprime cette condition.
       const st = (g.status ?? "").toLowerCase();
-      const isInteresting = st.includes("final") || st.includes("q") || st.includes("half") || st.includes("ot");
-      if (isInteresting) updates.push(formatGameLine(g));
+      const isInteresting =
+        st.includes("final") ||
+        st.includes("q") ||
+        st.includes("half") ||
+        st.includes("ot");
+
+      if (isInteresting) changed.push(g);
     }
   }
 
-  if (updates.length) {
-    await channel.send(`🏀 **Update scores**\n${updates.join("\n")}`);
+  if (!changed.length) return;
+
+  const embeds = changed.map(g => gameScoreEmbed(g, date));
+  for (let i = 0; i < embeds.length; i += 10) {
+    await scoresChannel.send({
+      content: i === 0 ? "🏀 **Update scores**" : undefined,
+      embeds: embeds.slice(i, i + 10),
+    });
   }
 }
 
-// ---- BallDontLie: injuries
-// Doc: GET https://api.balldontlie.io/v1/player_injuries :contentReference[oaicite:2]{index=2}
+// ======================
+// Injuries / News (inchangé)
+// ======================
 async function fetchInjuriesPage(cursor = null) {
   const base = "https://api.balldontlie.io/v1/player_injuries?per_page=100";
   const url = cursor ? `${base}&cursor=${encodeURIComponent(cursor)}` : base;
@@ -164,28 +288,26 @@ function formatInjury(i) {
 }
 
 async function pollAndPostInjuries(channel) {
-  // On prend juste la 1ère page (100). Si tu veux tout, boucle sur cursor.
   const json = await fetchInjuriesPage(null);
   const injuries = json.data ?? [];
   if (!injuries.length) return;
 
-  // On poste seulement les nouveautés (clé basée sur id + updated_at si dispo)
   const lines = [];
-  for (const i of injuries.slice(0, 20)) { // limite anti-spam
+  for (const i of injuries.slice(0, 20)) {
     const id = String(i.id ?? `${i.player?.id}-${i.team?.id}-${i.status}`);
     const sig = `${i.status}|${i.description ?? ""}|${i.updated_at ?? ""}`;
-    if (shouldPost(`injury_${id}`, sig)) {
-      lines.push(formatInjury(i));
-    }
+    if (shouldPost(`injury_${id}`, sig)) lines.push(formatInjury(i));
   }
 
   if (lines.length) {
-    await channel.send(`🩺 **Injury update**\n${lines.join("\n")}`);
+    const embed = new EmbedBuilder()
+      .setTitle("🩺 Injury update")
+      .setDescription(lines.join("\n"))
+      .setTimestamp(new Date());
+    await channel.send({ embeds: [embed] });
   }
 }
 
-// ---- ESPN news (trade/draft)
-// Simple: on filtre par mots-clés dans le titre
 async function fetchEspnNbaNews() {
   const url = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/news";
   const res = await fetch(url);
@@ -217,19 +339,32 @@ async function pollAndPostNews(tradeChannel, draftChannel) {
 
     if (isTrade && tradeChannel) {
       if (shouldPost(`news_trade_${id}`, title)) {
-        await tradeChannel.send(`🔁 **TRADE / TRANSACTION**\n**${title}**\n${link}`);
+        const embed = new EmbedBuilder()
+          .setTitle("🔁 Trade / Transaction")
+          .setDescription(`**${title}**\n${link}`)
+          .setTimestamp(new Date());
+        await tradeChannel.send({ embeds: [embed] });
       }
     } else if (isDraft && draftChannel) {
       if (shouldPost(`news_draft_${id}`, title)) {
-        await draftChannel.send(`🧢 **DRAFT**\n**${title}**\n${link}`);
+        const embed = new EmbedBuilder()
+          .setTitle("🧢 Draft")
+          .setDescription(`**${title}**\n${link}`)
+          .setTimestamp(new Date());
+        await draftChannel.send({ embeds: [embed] });
       }
     }
   }
 }
 
-// ---- Boot
+// ======================
+// BOOT
+// ======================
 client.once(Events.ClientReady, async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
+
+  const matchDuJourChannel = await client.channels.fetch(CHANNEL_MATCH_DU_JOUR);
+  if (!matchDuJourChannel?.isTextBased()) throw new Error("❌ CHANNEL_MATCH_DU_JOUR n'est pas un salon texte");
 
   const scoresChannel = await client.channels.fetch(CHANNEL_SCORES_ID);
   if (!scoresChannel?.isTextBased()) throw new Error("❌ CHANNEL_SCORES_ID n'est pas un salon texte");
@@ -242,19 +377,19 @@ client.once(Events.ClientReady, async () => {
   if (tradeChannel && !tradeChannel.isTextBased())   throw new Error("❌ CHANNEL_TRADE_ID n'est pas un salon texte");
   if (draftChannel && !draftChannel.isTextBased())   throw new Error("❌ CHANNEL_DRAFT_ID n'est pas un salon texte");
 
-  // 1) Au démarrage : schedule du jour
-  await postDailyScheduleIfNeeded(scoresChannel).catch(console.error);
+  // 1) Au démarrage : programme du jour -> channel match_du_jour
+  await postDailyScheduleIfNeeded(matchDuJourChannel).catch(console.error);
 
-  // 2) Scores toutes les 5 minutes
+  // 2) Scores toutes les 5 minutes -> channel scores
   setInterval(() => {
     pollAndPostScoreUpdates(scoresChannel).catch(console.error);
   }, 5 * 60 * 1000);
 
-  // 3) Schedule à 09:00 (Paris)
+  // 3) Programme à 09:00 (Paris) -> channel match_du_jour
   setInterval(() => {
     const { hh, mi } = parisHourMinute();
     if (hh === 9 && mi === 0) {
-      postDailyScheduleIfNeeded(scoresChannel).catch(console.error);
+      postDailyScheduleIfNeeded(matchDuJourChannel).catch(console.error);
     }
   }, 60 * 1000);
 
